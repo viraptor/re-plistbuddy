@@ -2099,3 +2099,74 @@ fn corrupted_file_does_not_crash() {
         fs::remove_file(&f).ok();
     }
 }
+
+// ============================================================
+// Read-only commands don't write the file
+// ============================================================
+
+#[test]
+fn print_does_not_write_readonly_file() {
+    let f = sample_plist();
+    let mut perms = fs::metadata(&f).unwrap().permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&f, perms).unwrap();
+
+    let r = run_c("Print :Name", &f);
+    assert_eq!(r.stdout, "Test App\n");
+    assert!(r.stderr.is_empty());
+    assert_eq!(r.exit_code, 0);
+
+    // Restore permissions for cleanup
+    let mut perms = fs::metadata(&f).unwrap().permissions();
+    perms.set_readonly(false);
+    fs::set_permissions(&f, perms).unwrap();
+}
+
+#[test]
+fn multiple_prints_dont_write_readonly_file() {
+    let f = sample_plist();
+    let mut perms = fs::metadata(&f).unwrap().permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&f, perms).unwrap();
+
+    let r = run_multi_c(&["Print :Name", "Print :Version"], &f);
+    assert!(r.stdout.contains("Test App"));
+    assert!(r.stdout.contains("42"));
+    assert!(r.stderr.is_empty());
+    assert_eq!(r.exit_code, 0);
+
+    let mut perms = fs::metadata(&f).unwrap().permissions();
+    perms.set_readonly(false);
+    fs::set_permissions(&f, perms).unwrap();
+}
+
+#[test]
+fn help_does_not_write_readonly_file() {
+    let f = sample_plist();
+    let mut perms = fs::metadata(&f).unwrap().permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&f, perms).unwrap();
+
+    let r = run_c("Help", &f);
+    assert!(r.stdout.contains("Command Format:"));
+    assert_eq!(r.exit_code, 0);
+
+    let mut perms = fs::metadata(&f).unwrap().permissions();
+    perms.set_readonly(false);
+    fs::set_permissions(&f, perms).unwrap();
+}
+
+#[test]
+fn set_on_readonly_file_fails_on_write() {
+    let f = sample_plist();
+    let mut perms = fs::metadata(&f).unwrap().permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&f, perms).unwrap();
+
+    let r = run_c("Set :Name changed", &f);
+    assert_eq!(r.exit_code, 1);
+
+    let mut perms = fs::metadata(&f).unwrap().permissions();
+    perms.set_readonly(false);
+    fs::set_permissions(&f, perms).unwrap();
+}

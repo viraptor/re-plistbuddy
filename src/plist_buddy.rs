@@ -62,6 +62,7 @@ struct PlistState {
     root: Value,
     file_path: PathBuf,
     xml_output: bool,
+    dirty: bool,
 }
 
 impl PlistState {
@@ -126,6 +127,7 @@ impl PlistState {
             root,
             file_path: resolved,
             xml_output: false,
+            dirty: false,
         })
     }
 
@@ -138,7 +140,13 @@ impl PlistState {
     fn revert(&mut self) -> Result<()> {
         self.root = Value::from_file(&self.file_path)
             .with_context(|| format!("Error Reading File: {}", self.file_path.display()))?;
+        self.dirty = false;
         Ok(())
+    }
+
+    fn mutated(&mut self) -> CommandResult {
+        self.dirty = true;
+        CommandResult::Ok
     }
 }
 
@@ -259,6 +267,7 @@ fn handle_result(state: &mut PlistState, result: CommandResult, any_failed: &mut
         CommandResult::Save => {
             println!("Saving...");
             state.save()?;
+            state.dirty = false;
             Ok(false)
         }
         CommandResult::Revert => {
@@ -305,7 +314,9 @@ fn run_commands(state: &mut PlistState, commands: &[String]) -> Result<bool> {
         handle_result(state, result, &mut any_failed)?;
     }
 
-    state.save()?;
+    if state.dirty {
+        state.save()?;
+    }
     Ok(any_failed)
 }
 
@@ -747,7 +758,7 @@ fn cmd_clear(state: &mut PlistState, args: &str) -> CommandResult {
     };
 
     state.root = new_root;
-    CommandResult::Ok
+    state.mutated()
 }
 
 fn parse_type_for_clear(type_str: &str) -> Option<Value> {
@@ -795,7 +806,7 @@ fn cmd_set(state: &mut PlistState, args: &str) -> CommandResult {
 
     let new_value = coerce_value(target, &value_str);
     *target = new_value;
-    CommandResult::Ok
+    state.mutated()
 }
 
 fn coerce_value(existing: &Value, input: &str) -> Value {
@@ -864,10 +875,9 @@ fn cmd_add(state: &mut PlistState, args: &str) -> CommandResult {
             match &mut state.root {
                 Value::Array(arr) => {
                     arr.push(new_value);
-                    return CommandResult::Ok;
+                    return state.mutated();
                 }
                 Value::Dictionary(dict) => {
-                    // ":" on a dict adds an empty key
                     if path.is_empty() || path.last().is_some_and(|s| s.is_empty()) {
                         let key = "".to_string();
                         if dict.contains_key(&key) {
@@ -877,7 +887,7 @@ fn cmd_add(state: &mut PlistState, args: &str) -> CommandResult {
                             ));
                         }
                         dict.insert(key, new_value);
-                        return CommandResult::Ok;
+                        return state.mutated();
                     }
                     return CommandResult::StderrError(format!(
                         "Add: \"{}\", Entry Already Exists",
@@ -904,7 +914,7 @@ fn cmd_add(state: &mut PlistState, args: &str) -> CommandResult {
         match target {
             Value::Array(arr) => {
                 arr.push(new_value);
-                CommandResult::Ok
+                state.mutated()
             }
             _ => CommandResult::StderrError(format!(
                 "Add: Entry, \"{}\", Does Not Exist",
@@ -934,14 +944,14 @@ fn cmd_add(state: &mut PlistState, args: &str) -> CommandResult {
                         ));
                     }
                     dict.insert(key.clone(), new_value);
-                    CommandResult::Ok
+                    state.mutated()
                 }
                 Value::Array(arr) => {
                     if is_index {
                         let idx: usize = last.parse().unwrap_or(0);
                         let idx = idx.min(arr.len());
                         arr.insert(idx, new_value);
-                        CommandResult::Ok
+                        state.mutated()
                     } else {
                         CommandResult::StderrError(format!(
                             "Add: Entry, \"{}\", Does Not Exist",
@@ -976,14 +986,14 @@ fn cmd_add(state: &mut PlistState, args: &str) -> CommandResult {
                         ));
                     }
                     dict.insert(key.clone(), new_value);
-                    CommandResult::Ok
+                    state.mutated()
                 }
                 Value::Array(arr) => {
                     if is_index {
                         let idx: usize = last.parse().unwrap_or(0);
                         let idx = idx.min(arr.len());
                         arr.insert(idx, new_value);
-                        CommandResult::Ok
+                        state.mutated()
                     } else {
                         CommandResult::StderrError(format!(
                             "Add: Entry, \"{}\", Does Not Exist",
@@ -1075,7 +1085,7 @@ fn cmd_copy(state: &mut PlistState, args: &str) -> CommandResult {
         match &mut state.root {
             Value::Dictionary(dict) => {
                 dict.insert(dst_path[0].clone(), src_value);
-                CommandResult::Ok
+                state.mutated()
             }
             _ => CommandResult::StderrError(format!(
                 "Copy: Entry, \"{}\", Does Not Exist",
@@ -1098,7 +1108,7 @@ fn cmd_copy(state: &mut PlistState, args: &str) -> CommandResult {
         match parent {
             Value::Dictionary(dict) => {
                 dict.insert(key, src_value);
-                CommandResult::Ok
+                state.mutated()
             }
             _ => CommandResult::StderrError(format!(
                 "Copy: Entry, \"{}\", Does Not Exist",
@@ -1146,7 +1156,7 @@ fn cmd_delete(state: &mut PlistState, args: &str) -> CommandResult {
     match parent {
         Value::Dictionary(dict) => {
             if dict.remove(key).is_some() {
-                CommandResult::Ok
+                state.mutated()
             } else {
                 err()
             }
@@ -1155,7 +1165,7 @@ fn cmd_delete(state: &mut PlistState, args: &str) -> CommandResult {
             if let Ok(idx) = key.parse::<usize>() {
                 if idx < arr.len() {
                     arr.remove(idx);
-                    CommandResult::Ok
+                    state.mutated()
                 } else {
                     err()
                 }
@@ -1224,7 +1234,7 @@ fn cmd_merge(state: &mut PlistState, args: &str) -> CommandResult {
         _ => {}
     }
 
-    CommandResult::Ok
+    state.mutated()
 }
 
 // --- Import ---
@@ -1263,18 +1273,17 @@ fn cmd_import(state: &mut PlistState, args: &str) -> CommandResult {
 
     if path.is_empty() {
         state.root = new_value;
-        return CommandResult::Ok;
+        return state.mutated();
     }
 
-    // Try to set existing entry, or create new
     if let Ok(target) = resolve_entry_mut(&mut state.root, &path) {
         *target = new_value;
-        CommandResult::Ok
+        state.mutated()
     } else if path.len() == 1 {
         match &mut state.root {
             Value::Dictionary(dict) => {
                 dict.insert(path[0].clone(), new_value);
-                CommandResult::Ok
+                state.mutated()
             }
             _ => CommandResult::StderrError(format!(
                 "Import: Entry, \"{}\", Does Not Exist",
@@ -1287,7 +1296,7 @@ fn cmd_import(state: &mut PlistState, args: &str) -> CommandResult {
         match resolve_entry_mut(&mut state.root, parent_path) {
             Ok(Value::Dictionary(dict)) => {
                 dict.insert(key.clone(), new_value);
-                CommandResult::Ok
+                state.mutated()
             }
             _ => CommandResult::StderrError(format!(
                 "Import: Entry, \"{}\", Does Not Exist",
@@ -1322,6 +1331,7 @@ mod tests {
             root: Value::Dictionary(dict),
             file_path: PathBuf::from("/tmp/test.plist"),
             xml_output: false,
+            dirty: false,
         }
     }
 
