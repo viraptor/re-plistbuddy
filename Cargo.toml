@@ -1,0 +1,13 @@
+[package]
+name = "re-plistbuddy"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+
+[[bin]]
+name = "PlistBuddy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"

@@ -1,0 +1,7 @@
+# Deciduous database (local)
+.deciduous/
+
+
+# Added by cargo
+
+/target
