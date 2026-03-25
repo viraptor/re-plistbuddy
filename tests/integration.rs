@@ -2170,3 +2170,247 @@ fn set_on_readonly_file_fails_on_write() {
     perms.set_readonly(false);
     fs::set_permissions(&f, perms).unwrap();
 }
+
+// ============================================================
+// Multi-command batch operations (real-world patterns)
+// ============================================================
+
+fn info_plist() -> PathBuf {
+    temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CommitHash</key>
+	<string>abc123</string>
+	<key>BuildNumber</key>
+	<string>0</string>
+</dict>
+</plist>"#,
+    )
+}
+
+#[test]
+fn multi_set_build_info_pattern() {
+    let f = info_plist();
+    let r = run_multi_c(
+        &[
+            "Set :CommitHash def456",
+            "Set :BuildNumber 99",
+            "Set :CFBundleVersion 42",
+            "Set :CFBundleShortVersionString 2.0.0",
+        ],
+        &f,
+    );
+    assert_eq!(r.exit_code, 0);
+    assert!(r.stderr.is_empty());
+
+    let r1 = run_c("Print :CommitHash", &f);
+    assert_eq!(r1.stdout, "def456\n");
+    let r2 = run_c("Print :BuildNumber", &f);
+    assert_eq!(r2.stdout, "99\n");
+    let r3 = run_c("Print :CFBundleVersion", &f);
+    assert_eq!(r3.stdout, "42\n");
+    let r4 = run_c("Print :CFBundleShortVersionString", &f);
+    assert_eq!(r4.stdout, "2.0.0\n");
+}
+
+#[test]
+fn multi_set_with_single_quoted_values() {
+    let f = info_plist();
+    let r = run_multi_c(
+        &[
+            "Set :CommitHash 'hash-value'",
+            "Set :BuildNumber '55'",
+        ],
+        &f,
+    );
+    assert_eq!(r.exit_code, 0);
+    // Single quotes are stripped by the tokenizer
+    let r1 = run_c("Print :CommitHash", &f);
+    assert_eq!(r1.stdout, "hash-value\n");
+    let r2 = run_c("Print :BuildNumber", &f);
+    assert_eq!(r2.stdout, "55\n");
+}
+
+#[test]
+fn multi_add_set_delete_print_chain() {
+    let f = empty_dict_plist();
+    let r = run_multi_c(
+        &[
+            "Add :A string alpha",
+            "Add :B string beta",
+            "Add :C string gamma",
+            "Set :B BETA",
+            "Delete :C",
+            "Print :A",
+            "Print :B",
+        ],
+        &f,
+    );
+    assert!(r.stdout.contains("alpha"));
+    assert!(r.stdout.contains("BETA"));
+    assert_eq!(r.exit_code, 0);
+
+    // Verify C was deleted
+    let r2 = run_c("Print :C", &f);
+    assert_eq!(r2.exit_code, 1);
+}
+
+#[test]
+fn multi_set_ten_keys() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>K1</key><string>v1</string>
+	<key>K2</key><string>v2</string>
+	<key>K3</key><string>v3</string>
+	<key>K4</key><string>v4</string>
+	<key>K5</key><string>v5</string>
+	<key>K6</key><string>v6</string>
+	<key>K7</key><string>v7</string>
+	<key>K8</key><string>v8</string>
+	<key>K9</key><string>v9</string>
+	<key>K10</key><string>v10</string>
+</dict>
+</plist>"#,
+    );
+    let r = run_multi_c(
+        &[
+            "Set :K1 new1", "Set :K2 new2", "Set :K3 new3", "Set :K4 new4",
+            "Set :K5 new5", "Set :K6 new6", "Set :K7 new7", "Set :K8 new8",
+            "Set :K9 new9", "Set :K10 new10",
+        ],
+        &f,
+    );
+    assert_eq!(r.exit_code, 0);
+
+    for i in 1..=10 {
+        let r = run_c(&format!("Print :K{i}"), &f);
+        assert_eq!(r.stdout, format!("new{i}\n"));
+    }
+}
+
+#[test]
+fn multi_add_to_array_then_print() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Items</key>
+	<array/>
+</dict>
+</plist>"#,
+    );
+    let r = run_multi_c(
+        &[
+            "Add :Items: string first",
+            "Add :Items: string second",
+            "Add :Items: string third",
+            "Print :Items",
+        ],
+        &f,
+    );
+    assert!(r.stdout.contains("first"));
+    assert!(r.stdout.contains("second"));
+    assert!(r.stdout.contains("third"));
+    assert_eq!(r.exit_code, 0);
+}
+
+#[test]
+fn multi_command_with_one_failure_still_runs_rest() {
+    let f = sample_plist();
+    let r = run_multi_c(
+        &[
+            "Set :Name first",
+            "Set :Nonexistent value",
+            "Set :Name second",
+        ],
+        &f,
+    );
+    // Error from the middle command
+    assert_eq!(r.exit_code, 1);
+    // But the third Set still ran
+    let r2 = run_c("Print :Name", &f);
+    assert_eq!(r2.stdout, "second\n");
+}
+
+#[test]
+fn multi_add_creates_deep_structure() {
+    let f = empty_dict_plist();
+    let r = run_multi_c(
+        &[
+            "Add :app:name string MyApp",
+            "Add :app:version string 1.0",
+            "Add :app:build integer 42",
+        ],
+        &f,
+    );
+    assert_eq!(r.exit_code, 0);
+
+    let r1 = run_c("Print :app:name", &f);
+    assert_eq!(r1.stdout, "MyApp\n");
+    let r2 = run_c("Print :app:version", &f);
+    assert_eq!(r2.stdout, "1.0\n");
+    let r3 = run_c("Print :app:build", &f);
+    assert_eq!(r3.stdout, "42\n");
+}
+
+#[test]
+fn multi_copy_and_modify() {
+    let f = sample_plist();
+    let r = run_multi_c(
+        &[
+            "Copy :Name :NameBackup",
+            "Set :Name Modified",
+            "Print :Name",
+            "Print :NameBackup",
+        ],
+        &f,
+    );
+    assert!(r.stdout.contains("Modified"));
+    assert!(r.stdout.contains("Test App"));
+    assert_eq!(r.exit_code, 0);
+}
+
+#[test]
+fn multi_save_then_modify_then_revert() {
+    let f = sample_plist();
+    let r = run_multi_c(
+        &[
+            "Set :Name first",
+            "Save",
+            "Set :Name second",
+            "Revert",
+            "Print :Name",
+        ],
+        &f,
+    );
+    // After Save+Revert, should be back to "first" (the saved state)
+    assert!(r.stdout.contains("first"));
+}
+
+#[test]
+fn multi_clear_then_rebuild() {
+    let f = sample_plist();
+    let r = run_multi_c(
+        &[
+            "Clear dict",
+            "Add :NewKey string rebuilt",
+            "Add :Num integer 99",
+            "Print :NewKey",
+            "Print :Num",
+        ],
+        &f,
+    );
+    assert!(r.stdout.contains("rebuilt"));
+    assert!(r.stdout.contains("99"));
+    assert_eq!(r.exit_code, 0);
+}
