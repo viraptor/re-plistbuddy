@@ -539,7 +539,10 @@ fn cmd_print(state: &PlistState, args: &str) -> CommandResult {
 }
 
 fn print_xml(value: &Value) {
-    let buf = value.to_xml_bytes().expect("XML serialization failed");
+    let Ok(buf) = value.to_xml_bytes() else {
+        eprintln!("XML serialization failed");
+        return;
+    };
     let s = String::from_utf8_lossy(&buf);
     print!("{s}");
     if !s.ends_with('\n') {

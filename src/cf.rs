@@ -535,15 +535,19 @@ fn write_plist(value: &Value, path: &Path, format: CFPropertyListFormat) -> anyh
 }
 
 pub fn format_double_6f(v: f64) -> String {
+    format_cf_string("%.6f", v)
+}
+
+pub fn format_cf_string(fmt_str: &str, v: f64) -> String {
     unsafe {
-        let fmt = cf_string_from_str("%.6f").unwrap();
+        let fmt = cf_string_from_str(fmt_str).unwrap();
         let result = CFStringCreateWithFormat(
             ptr::null(),
             ptr::null(),
             fmt.as_ptr(),
             v,
         );
-        let s = cf_string_to_string(result).unwrap_or_else(|| format!("{v:.6}"));
+        let s = cf_string_to_string(result).unwrap_or_else(|| format!("{v}"));
         CFRelease(result);
         s
     }

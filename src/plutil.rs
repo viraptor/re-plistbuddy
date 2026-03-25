@@ -344,7 +344,7 @@ fn read_input(file_arg: &str) -> anyhow::Result<Value> {
     if file_arg == "-" {
         let mut buf = Vec::new();
         std::io::stdin().lock().read_to_end(&mut buf)?;
-        let tmp = std::env::temp_dir().join("plutil_stdin.plist");
+        let tmp = std::env::temp_dir().join(format!("plutil_stdin_{}.plist", std::process::id()));
         std::fs::write(&tmp, &buf)?;
         let val = Value::from_file(&tmp)?;
         std::fs::remove_file(&tmp).ok();
@@ -392,7 +392,7 @@ fn process_file(file_arg: &str, opts: &Options) -> anyhow::Result<()> {
             let result = if file_arg == "-" {
                 let mut buf = Vec::new();
                 std::io::stdin().lock().read_to_end(&mut buf)?;
-                let tmp = std::env::temp_dir().join("plutil_lint_stdin.plist");
+                let tmp = std::env::temp_dir().join(format!("plutil_lint_stdin_{}.plist", std::process::id()));
                 std::fs::write(&tmp, &buf)?;
                 let r = Value::from_file(&tmp);
                 std::fs::remove_file(&tmp).ok();
@@ -572,7 +572,7 @@ fn write_value_as_format(value: &Value, path: &str, format: &Format, readable: b
         Format::Binary1 => {
             if path == "-" {
                 // Write to temp, then copy to stdout
-                let tmp = std::env::temp_dir().join("plutil_bin_tmp.plist");
+                let tmp = std::env::temp_dir().join(format!("plutil_bin_{}.plist", std::process::id()));
                 value.to_file_binary(&tmp)?;
                 let data = std::fs::read(&tmp)?;
                 std::io::stdout().write_all(&data)?;
@@ -767,7 +767,7 @@ fn make_value(type_name: &str, value_str: Option<&str>) -> anyhow::Result<Value>
         "xml" => {
             let s = value_str.ok_or_else(|| anyhow::anyhow!("Missing XML value"))?;
             // Parse XML plist fragment
-            let tmp = std::env::temp_dir().join("plutil_xml_tmp.plist");
+            let tmp = std::env::temp_dir().join(format!("plutil_xml_{}.plist", std::process::id()));
             std::fs::write(&tmp, s)?;
             let val = Value::from_file(&tmp)?;
             std::fs::remove_file(&tmp).ok();
@@ -1154,21 +1154,7 @@ fn value_to_json_readable(value: &Value, indent: usize) -> String {
 }
 
 fn format_json_real(f: f64) -> String {
-    // Match Apple's JSON real formatting
-    let mut buf = [0u8; 64];
-    let fmt = b"%.17g\0";
-    let len = unsafe {
-        libc::snprintf(
-            buf.as_mut_ptr() as *mut libc::c_char,
-            buf.len(),
-            fmt.as_ptr() as *const libc::c_char,
-            f,
-        )
-    };
-    let len = (len as usize).min(buf.len() - 1);
-    let s = std::str::from_utf8(&buf[..len]).unwrap_or("0");
-    // Apple appends extra zeros after the decimal point - use their format
-    s.to_string()
+    crate::cf::format_cf_string("%.17g", f)
 }
 
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
