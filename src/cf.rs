@@ -70,6 +70,12 @@ unsafe extern "C" {
         length: CFIndex,
         encoding: CFStringEncoding,
     ) -> CFIndex;
+    fn CFStringCreateWithFormat(
+        alloc: CFAllocatorRef,
+        format_options: CFTypeRef,
+        format: CFStringRef,
+        ...
+    ) -> CFStringRef;
 
     // Number
     fn CFNumberCreate(
@@ -525,6 +531,21 @@ fn write_plist(value: &Value, path: &Path, format: CFPropertyListFormat) -> anyh
         }
 
         Ok(())
+    }
+}
+
+pub fn format_double_6f(v: f64) -> String {
+    unsafe {
+        let fmt = cf_string_from_str("%.6f").unwrap();
+        let result = CFStringCreateWithFormat(
+            ptr::null(),
+            ptr::null(),
+            fmt.as_ptr(),
+            v,
+        );
+        let s = cf_string_to_string(result).unwrap_or_else(|| format!("{v:.6}"));
+        CFRelease(result);
+        s
     }
 }
 

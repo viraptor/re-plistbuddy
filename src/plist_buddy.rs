@@ -653,18 +653,7 @@ fn print_scalar_inline(value: &Value) {
 }
 
 fn format_real(v: f64) -> String {
-    let mut buf = [0u8; 64];
-    let fmt = b"%.6f\0";
-    let len = unsafe {
-        libc::snprintf(
-            buf.as_mut_ptr() as *mut libc::c_char,
-            buf.len(),
-            fmt.as_ptr() as *const libc::c_char,
-            v,
-        )
-    };
-    let len = (len as usize).min(buf.len() - 1);
-    String::from_utf8_lossy(&buf[..len]).to_string()
+    crate::cf::format_double_6f(v)
 }
 
 fn format_date(abs_time: crate::value::AbsoluteTime) -> String {

@@ -27,7 +27,7 @@ Command options are (-lint is the default):
                                -json: a JSON fragment, useful for inserting compound values
                                -dictionary: inserts an empty dictionary, does not use value
                                -array: inserts an empty array, does not use value
-
+                              \x20
                                optionally, -append may be specified if the keypath references an array to append to the
                                end of the array
                                value YES, NO, a number, a date, or a base-64 encoded blob of data
@@ -38,8 +38,8 @@ Command options are (-lint is the default):
                                an additional \"-expect type\" option can be provided to test that
                                the value at the specified keypath is of the specified \"type\", which
                                can be one of: bool, integer, float, string, date, data, dictionary, array
-
-                               when fmt is raw:
+                              \x20
+                               when fmt is raw:\x20
                                    the following is printed to stdout for each value type:
                                        bool: the string \"true\" or \"false\"
                                        integer: the numeric value
@@ -114,18 +114,6 @@ fn parse_format(s: &str) -> Result<Format, String> {
     }
 }
 
-fn set_command(command: &mut Option<Command>, new: Command) -> Result<(), String> {
-    if command.is_some() {
-        return Err(format!("unrecognized option: {}", match &new {
-            Command::Lint => "-lint",
-            Command::Print => "-p",
-            Command::Help => "-help",
-            _ => "unknown",
-        }));
-    }
-    *command = Some(new);
-    Ok(())
-}
 
 fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut command: Option<Command> = None;
@@ -819,18 +807,7 @@ fn format_raw(value: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Integer(i) => i.to_string(),
         Value::Real(f) => {
-            let mut buf = [0u8; 64];
-            let fmt = b"%.6f\0";
-            let len = unsafe {
-                libc::snprintf(
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    buf.len(),
-                    fmt.as_ptr() as *const libc::c_char,
-                    *f,
-                )
-            };
-            let len = (len as usize).min(buf.len() - 1);
-            String::from_utf8_lossy(&buf[..len]).to_string()
+            crate::cf::format_double_6f(*f)
         }
         Value::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
         Value::Date(abs) => format_iso_date(*abs),
