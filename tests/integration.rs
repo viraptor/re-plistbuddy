@@ -17,6 +17,12 @@ fn temp_plist(content: &str) -> PathBuf {
     let id = COUNTER.fetch_add(1, Ordering::SeqCst);
     let tid = std::thread::current().id();
     let path = std::env::temp_dir().join(format!("re_pb_test_{tid:?}_{id}.plist"));
+    // Ensure writeable if leftover from a crashed readonly test
+    if path.exists() {
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(false);
+        let _ = fs::set_permissions(&path, perms);
+    }
     fs::write(&path, content).unwrap();
     path
 }
@@ -2157,18 +2163,30 @@ fn help_does_not_write_readonly_file() {
 }
 
 #[test]
-fn set_on_readonly_file_fails_on_write() {
-    let f = sample_plist();
+fn set_on_readonly_file_prints_error_but_exits_zero() {
+    let f = std::env::temp_dir().join("re_pb_readonly_test.plist");
+    let _ = fs::remove_file(&f); // clean up any leftover
+    fs::write(&f, r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Name</key>
+	<string>Test App</string>
+</dict>
+</plist>"#).unwrap();
     let mut perms = fs::metadata(&f).unwrap().permissions();
     perms.set_readonly(true);
     fs::set_permissions(&f, perms).unwrap();
 
     let r = run_c("Set :Name changed", &f);
-    assert_eq!(r.exit_code, 1);
+    // PlistBuddy prints a write error but still exits 0 (matching Apple)
+    assert!(!r.stderr.is_empty());
+    assert_eq!(r.exit_code, 0);
 
     let mut perms = fs::metadata(&f).unwrap().permissions();
     perms.set_readonly(false);
     fs::set_permissions(&f, perms).unwrap();
+    fs::remove_file(&f).ok();
 }
 
 // ============================================================
@@ -2413,4 +2431,248 @@ fn multi_clear_then_rebuild() {
     assert!(r.stdout.contains("rebuilt"));
     assert!(r.stdout.contains("99"));
     assert_eq!(r.exit_code, 0);
+}
+
+// ============================================================
+// Bool "1" is true
+// ============================================================
+
+#[test]
+fn add_bool_1_is_true() {
+    let f = empty_dict_plist();
+    run_c("Add :B bool 1", &f);
+    let r = run_c("Print :B", &f);
+    assert_eq!(r.stdout, "true\n");
+}
+
+#[test]
+fn set_bool_1_is_true() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>B</key>
+	<false/>
+</dict>
+</plist>"#,
+    );
+    run_c("Set :B 1", &f);
+    let r = run_c("Print :B", &f);
+    assert_eq!(r.stdout, "true\n");
+}
+
+// ============================================================
+// Set integer to float-like value truncates
+// ============================================================
+
+#[test]
+fn set_integer_truncates_float() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Int</key>
+	<integer>0</integer>
+</dict>
+</plist>"#,
+    );
+    run_c("Set :Int 3.14", &f);
+    let r = run_c("Print :Int", &f);
+    assert_eq!(r.stdout, "3\n");
+}
+
+// ============================================================
+// Interactive mode via piped input
+// ============================================================
+
+#[test]
+fn interactive_mode_via_pipe() {
+    let f = sample_plist();
+    let output = Command::new(binary())
+        .arg(f.to_str().unwrap())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                stdin.write_all(b"Print :Name\n").ok();
+            }
+            child.wait_with_output()
+        })
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Test App"));
+}
+
+// ============================================================
+// Auto-create nested dicts then add siblings
+// ============================================================
+
+#[test]
+fn auto_create_then_add_sibling() {
+    let f = empty_dict_plist();
+    let r = run_multi_c(
+        &[
+            "Add :a:b:c string first",
+            "Add :a:b:d string second",
+            "Add :a:e string third",
+        ],
+        &f,
+    );
+    assert_eq!(r.exit_code, 0);
+    let r1 = run_c("Print :a:b:c", &f);
+    assert_eq!(r1.stdout, "first\n");
+    let r2 = run_c("Print :a:b:d", &f);
+    assert_eq!(r2.stdout, "second\n");
+    let r3 = run_c("Print :a:e", &f);
+    assert_eq!(r3.stdout, "third\n");
+}
+
+// ============================================================
+// Special chars in values
+// ============================================================
+
+#[test]
+fn set_value_with_url() {
+    let f = sample_plist();
+    run_c("Set :Name https://example.com:8080/path?q=1&r=2", &f);
+    let r = run_c("Print :Name", &f);
+    assert_eq!(r.stdout, "https://example.com:8080/path?q=1&r=2\n");
+}
+
+// ============================================================
+// Escape sequences in values
+// ============================================================
+
+#[test]
+fn value_escape_newline() {
+    let f = sample_plist();
+    run_c(r"Set :Name hello\nworld", &f);
+    let r = run_c("Print :Name", &f);
+    assert_eq!(r.stdout, "hello\nworld\n");
+}
+
+#[test]
+fn value_escape_tab() {
+    let f = sample_plist();
+    run_c(r"Set :Name hello\tworld", &f);
+    let r = run_c("Print :Name", &f);
+    assert_eq!(r.stdout, "hello\tworld\n");
+}
+
+#[test]
+fn value_escape_backslash() {
+    let f = sample_plist();
+    run_c(r"Set :Name back\\slash", &f);
+    let r = run_c("Print :Name", &f);
+    assert_eq!(r.stdout, "back\\slash\n");
+}
+
+// ============================================================
+// Add dict then populate in same batch
+// ============================================================
+
+#[test]
+fn add_dict_then_populate_same_batch() {
+    let f = empty_dict_plist();
+    let r = run_multi_c(
+        &[
+            "Add :NewDict dict",
+            "Add :NewDict:Inner string hello",
+        ],
+        &f,
+    );
+    assert_eq!(r.exit_code, 0);
+    let r2 = run_c("Print :NewDict:Inner", &f);
+    assert_eq!(r2.stdout, "hello\n");
+}
+
+#[test]
+fn add_array_then_append_same_batch() {
+    let f = empty_dict_plist();
+    let r = run_multi_c(
+        &[
+            "Add :Arr array",
+            "Add :Arr: string a",
+            "Add :Arr: string b",
+        ],
+        &f,
+    );
+    assert_eq!(r.exit_code, 0);
+    let r2 = run_c("Print :Arr", &f);
+    assert_eq!(r2.stdout, "Array {\n    a\n    b\n}\n");
+}
+
+// ============================================================
+// Merge type mismatch
+// ============================================================
+
+#[test]
+fn merge_dict_into_array_fails() {
+    let source = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict><key>K</key><string>V</string></dict>
+</plist>"#,
+    );
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array><string>a</string></array>
+</plist>"#,
+    );
+    let r = run_c(&format!("Merge {}", source.display()), &f);
+    assert!(r.stderr.contains("Merge: Can't Add dict Entries to array"));
+    assert_eq!(r.exit_code, 1);
+}
+
+// ============================================================
+// Set real with scientific notation
+// ============================================================
+
+#[test]
+fn set_real_scientific_notation() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict><key>R</key><real>0.0</real></dict>
+</plist>"#,
+    );
+    run_c("Set :R 1.5e2", &f);
+    let r = run_c("Print :R", &f);
+    assert_eq!(r.stdout, "150.000000\n");
+}
+
+// ============================================================
+// Write error exits 0
+// ============================================================
+
+#[test]
+fn write_error_exits_zero() {
+    let f = std::env::temp_dir().join("re_pb_write_err_test.plist");
+    let _ = fs::remove_file(&f);
+    fs::write(&f, r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict><key>K</key><string>V</string></dict>
+</plist>"#).unwrap();
+    let mut perms = fs::metadata(&f).unwrap().permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&f, perms).unwrap();
+
+    let r = run_c("Set :K changed", &f);
+    assert_eq!(r.exit_code, 0);
+    assert!(!r.stderr.is_empty());
+
+    let mut perms = fs::metadata(&f).unwrap().permissions();
+    perms.set_readonly(false);
+    fs::set_permissions(&f, perms).unwrap();
+    fs::remove_file(&f).ok();
 }

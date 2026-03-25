@@ -371,7 +371,26 @@ fn read_input(file_arg: &str) -> anyhow::Result<Value> {
                 "(The file \u{201c}{filename}\u{201d} couldn\u{2019}t be opened because there is no such file.)"
             );
         }
-        Value::from_file(path)
+        // Try CF plist reader first, fall back to JSON parser
+        match Value::from_file(path) {
+            Ok(v) => Ok(v),
+            Err(cf_err) => {
+                let content = std::fs::read_to_string(path).unwrap_or_default();
+                let trimmed = content.trim();
+                if trimmed.is_empty() {
+                    // Empty file = empty dict (matches Apple behavior)
+                    return Ok(Value::Dictionary(Dictionary::new()));
+                }
+                if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                    match parse_json_value(trimmed) {
+                        Ok(v) => Ok(v),
+                        Err(_) => Err(cf_err),
+                    }
+                } else {
+                    Err(cf_err)
+                }
+            }
+        }
     }
 }
 
@@ -381,7 +400,34 @@ fn process_file(file_arg: &str, opts: &Options) -> anyhow::Result<()> {
     match &opts.command {
         Command::Help => unreachable!(),
         Command::Lint => {
-            match read_input(file_arg) {
+            // Lint uses strict CF plist reader only (no JSON fallback)
+            let result = if file_arg == "-" {
+                let mut buf = Vec::new();
+                std::io::stdin().lock().read_to_end(&mut buf)?;
+                let tmp = std::env::temp_dir().join("plutil_lint_stdin.plist");
+                std::fs::write(&tmp, &buf)?;
+                let r = Value::from_file(&tmp);
+                std::fs::remove_file(&tmp).ok();
+                r
+            } else {
+                let path = Path::new(file_arg);
+                if !path.exists() {
+                    let filename = path.file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| file_arg.to_string());
+                    Err(anyhow::anyhow!(
+                        "(The file \u{201c}{filename}\u{201d} couldn\u{2019}t be opened because there is no such file.)"
+                    ))
+                } else {
+                    let content = std::fs::read(path)?;
+                    if content.is_empty() || content.iter().all(|&b| b == b'\n' || b == b' ') {
+                        Ok(Value::Dictionary(Dictionary::new()))
+                    } else {
+                        Value::from_file(path)
+                    }
+                }
+            };
+            match result {
                 Ok(_) => {
                     if !opts.silent {
                         let name = if file_arg == "-" { "<stdin>" } else { file_arg };
@@ -390,7 +436,13 @@ fn process_file(file_arg: &str, opts: &Options) -> anyhow::Result<()> {
                 }
                 Err(e) => {
                     let name = if file_arg == "-" { "<stdin>" } else { file_arg };
-                    eprintln!("{name}: {e}");
+                    let msg = format!("{e}");
+                    // CF parse errors need parens, but missing-file errors already have them
+                    if msg.starts_with('(') {
+                        eprintln!("{name}: {msg}");
+                    } else {
+                        eprintln!("{name}: ({msg})");
+                    }
                     return Err(anyhow::anyhow!(""));
                 }
             }
@@ -635,7 +687,7 @@ fn insert_at_keypath(root: &mut Value, keypath: &str, new_value: Value, append: 
                 arr.push(new_value);
                 return Ok(());
             }
-            _ => anyhow::bail!("Cannot append to non-array at keypath: {keypath}"),
+            _ => anyhow::bail!("Appending to a non-array at key path {keypath}"),
         }
     }
 
@@ -644,6 +696,9 @@ fn insert_at_keypath(root: &mut Value, keypath: &str, new_value: Value, append: 
 
     match parent {
         Value::Dictionary(dict) => {
+            if dict.contains_key(&key) {
+                anyhow::bail!("Value already exists at key path {keypath}");
+            }
             dict.insert(key, new_value);
         }
         Value::Array(arr) => {
@@ -1112,7 +1167,7 @@ fn value_to_json_readable(value: &Value, indent: usize) -> String {
             }
             // Sort keys for readable output
             let mut entries: Vec<(&str, &Value)> = dict.iter().collect();
-            entries.sort_by_key(|(k, _)| *k);
+            entries.sort_by(|(a, _), (b, _)| natural_cmp(a, b));
             let items: Vec<String> = entries.iter()
                 .map(|(k, v)| format!("{pad_inner}{} : {}", json_escape(k), value_to_json_readable(v, indent + 1)))
                 .collect();
@@ -1139,6 +1194,41 @@ fn format_json_real(f: f64) -> String {
     s.to_string()
 }
 
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+
+    loop {
+        match (ai.peek(), bi.peek()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(&ac), Some(&bc)) => {
+                if ac.is_ascii_digit() && bc.is_ascii_digit() {
+                    let an: String = ai.by_ref().take_while(|c| c.is_ascii_digit()).collect();
+                    let bn: String = bi.by_ref().take_while(|c| c.is_ascii_digit()).collect();
+                    let av: u64 = an.parse().unwrap_or(0);
+                    let bv: u64 = bn.parse().unwrap_or(0);
+                    match av.cmp(&bv) {
+                        std::cmp::Ordering::Equal => {}
+                        other => return other,
+                    }
+                } else {
+                    let al = ac.to_lowercase().next().unwrap_or(ac);
+                    let bl = bc.to_lowercase().next().unwrap_or(bc);
+                    match al.cmp(&bl) {
+                        std::cmp::Ordering::Equal => {
+                            ai.next();
+                            bi.next();
+                        }
+                        other => return other,
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn var_name_from_path(path: &str) -> String {
     let name = Path::new(path)
         .file_stem()
@@ -1157,6 +1247,14 @@ fn swift_type_tag(value: &Value) -> &'static str {
         Value::Data(_) => "data",
         Value::Array(_) => "array",
         Value::Dictionary(_) => "dict",
+    }
+}
+
+fn array_needs_any_annotation(arr: &[Value]) -> bool {
+    let mut tags = arr.iter().map(swift_type_tag);
+    match tags.next() {
+        None => false,
+        Some(first) => tags.any(|t| t != first),
     }
 }
 
@@ -1186,7 +1284,7 @@ fn value_to_swift(value: &Value, path: &str) -> String {
                 out.push_str(&format!("let {var} = [\n"));
             }
             let mut entries: Vec<(&str, &Value)> = dict.iter().collect();
-            entries.sort_by_key(|(k, _)| *k);
+            entries.sort_by(|(a, _), (b, _)| natural_cmp(a, b));
             for (key, val) in &entries {
                 out.push_str(&format!("    {} : ", swift_string_literal(key)));
                 swift_value(&mut out, val, 1);
@@ -1195,7 +1293,11 @@ fn value_to_swift(value: &Value, path: &str) -> String {
             out.push_str("]\n");
         }
         Value::Array(arr) => {
-            out.push_str(&format!("let {var} = [\n"));
+            if array_needs_any_annotation(arr) {
+                out.push_str(&format!("let {var} : [Any] = [\n"));
+            } else {
+                out.push_str(&format!("let {var} = [\n"));
+            }
             for item in arr {
                 out.push_str("    ");
                 swift_value(&mut out, item, 1);
@@ -1257,7 +1359,7 @@ fn swift_value(out: &mut String, value: &Value, indent: usize) {
             out.push_str("[\n");
             let inner_pad = "    ".repeat(indent + 1);
             let mut entries: Vec<(&str, &Value)> = dict.iter().collect();
-            entries.sort_by_key(|(k, _)| *k);
+            entries.sort_by(|(a, _), (b, _)| natural_cmp(a, b));
             for (key, val) in &entries {
                 out.push_str(&inner_pad);
                 out.push_str(&format!("{} : ", swift_string_literal(key)));
@@ -1278,12 +1380,7 @@ fn swift_string_literal(s: &str) -> String {
             '"' => result.push_str("\\\""),
             '\\' => result.push_str("\\\\"),
             '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
             '\0' => result.push_str("\\0"),
-            c if (c as u32) < 0x20 => {
-                result.push_str(&format!("\\u{{{:04x}}}", c as u32));
-            }
             c => result.push(c),
         }
     }
@@ -1379,7 +1476,7 @@ fn objc_value(out: &mut String, value: &Value, indent: usize) {
             out.push_str("@{\n");
             let inner_pad = "    ".repeat(indent + 1);
             let mut entries: Vec<(&str, &Value)> = dict.iter().collect();
-            entries.sort_by_key(|(k, _)| *k);
+            entries.sort_by(|(a, _), (b, _)| natural_cmp(a, b));
             for (key, val) in &entries {
                 out.push_str(&inner_pad);
                 out.push_str(&format!("{} : ", objc_string_literal(key)));
@@ -1401,7 +1498,6 @@ fn objc_string_literal(s: &str) -> String {
         match c {
             '"' => result.push_str("\\\""),
             '\\' => result.push_str("\\\\"),
-            '\t' => result.push_str("\\t"),
             '\0' => result.push_str("\\0"),
             c => result.push(c),
         }
@@ -1413,7 +1509,7 @@ fn objc_string_literal(s: &str) -> String {
 fn pretty_print(value: &Value, indent: usize) {
     let pad = "  ".repeat(indent);
     match value {
-        Value::String(s) => print!("{json_s}", json_s = json_escape(s)),
+        Value::String(s) => print!("\"{s}\""),
         Value::Integer(i) => print!("{i}"),
         Value::Real(f) => {
             // -p uses a shorter format
@@ -1458,9 +1554,9 @@ fn pretty_print(value: &Value, indent: usize) {
             println!("{{");
             // Sort keys for -p output
             let mut entries: Vec<(&str, &Value)> = dict.iter().collect();
-            entries.sort_by_key(|(k, _)| *k);
+            entries.sort_by(|(a, _), (b, _)| natural_cmp(a, b));
             for (key, val) in &entries {
-                print!("{pad}  {key_s} => ", key_s = json_escape(key));
+                print!("{pad}  \"{key}\" => ");
                 pretty_print(val, indent + 1);
                 println!();
             }

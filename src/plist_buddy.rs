@@ -315,7 +315,9 @@ fn run_commands(state: &mut PlistState, commands: &[String]) -> Result<bool> {
     }
 
     if state.dirty {
-        state.save()?;
+        if let Err(e) = state.save() {
+            eprintln!("{e}");
+        }
     }
     Ok(any_failed)
 }
@@ -399,9 +401,24 @@ fn next_token(s: &str) -> (String, &str) {
     }
 }
 
-/// Strip all quote characters from a string (for values/rest-of-line).
+/// Strip quote characters and process escape sequences (for values/rest-of-line).
 fn strip_quotes(s: &str) -> String {
-    s.chars().filter(|&c| c != '"' && c != '\'').collect()
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {}
+            '\\' => match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('\\') => result.push('\\'),
+                Some(other) => result.push(other),
+                None => {}
+            },
+            c => result.push(c),
+        }
+    }
+    result
 }
 
 fn parse_entry_path(entry: &str) -> Vec<String> {
@@ -815,6 +832,8 @@ fn coerce_value(existing: &Value, input: &str) -> Value {
         Value::Integer(_) => {
             if let Ok(v) = input.parse::<i64>() {
                 Value::Integer(v)
+            } else if let Ok(v) = input.parse::<f64>() {
+                Value::Integer(v as i64)
             } else {
                 println!("Unrecognized Integer Format");
                 existing.clone()
@@ -829,7 +848,7 @@ fn coerce_value(existing: &Value, input: &str) -> Value {
             }
         }
         Value::Boolean(_) => {
-            let v = matches!(input.to_lowercase().as_str(), "true" | "yes");
+            let v = matches!(input.to_lowercase().as_str(), "true" | "yes" | "1");
             Value::Boolean(v)
         }
         Value::Date(_) => {
@@ -1022,7 +1041,7 @@ fn make_value_from_type(type_str: &str, value_str: &str) -> std::result::Result<
             Ok(Some(Value::Real(v)))
         }
         "bool" => {
-            let v = matches!(value_str.to_lowercase().as_str(), "true" | "yes");
+            let v = matches!(value_str.to_lowercase().as_str(), "true" | "yes" | "1");
             Ok(Some(Value::Boolean(v)))
         }
         "date" => {
@@ -1231,7 +1250,21 @@ fn cmd_merge(state: &mut PlistState, args: &str) -> CommandResult {
                 target_arr.push(val.clone());
             }
         }
-        _ => {}
+        (target, source) => {
+            let target_type = match target {
+                Value::Dictionary(_) => "dict",
+                Value::Array(_) => "array",
+                _ => "scalar",
+            };
+            let source_type = match source {
+                Value::Dictionary(_) => "dict",
+                Value::Array(_) => "array",
+                _ => "scalar",
+            };
+            return CommandResult::StderrError(
+                format!("Merge: Can't Add {source_type} Entries to {target_type}")
+            );
+        }
     }
 
     state.mutated()

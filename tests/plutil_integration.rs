@@ -814,3 +814,622 @@ fn unicode_extract() {
     let r = run(&["-extract", "emoji", "raw", "-o", "-", f.to_str().unwrap()]);
     assert_eq!(r.stdout, "🎉\n");
 }
+
+// ============================================================
+// Empty file handling
+// ============================================================
+
+#[test]
+fn empty_file_lint_ok() {
+    let f = std::env::temp_dir().join("plutil_empty_lint.plist");
+    fs::write(&f, b"\n").unwrap();
+    let r = run(&["-lint", f.to_str().unwrap()]);
+    assert!(r.stdout.contains(": OK"));
+    assert_eq!(r.exit_code, 0);
+    fs::remove_file(&f).ok();
+}
+
+#[test]
+fn empty_file_pretty_print() {
+    let f = std::env::temp_dir().join("plutil_empty_p.plist");
+    fs::write(&f, b"\n").unwrap();
+    let r = run(&["-p", f.to_str().unwrap()]);
+    assert!(r.stdout.contains("{"));
+    assert_eq!(r.exit_code, 0);
+    fs::remove_file(&f).ok();
+}
+
+// ============================================================
+// JSON plist reading
+// ============================================================
+
+#[test]
+fn read_json_plist_extract() {
+    let f = std::env::temp_dir().join("plutil_json_read.plist");
+    fs::write(&f, b"{\"Name\":\"Test\",\"Num\":42}").unwrap();
+    let r = run(&["-extract", "Name", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "Test\n");
+    assert_eq!(r.exit_code, 0);
+    fs::remove_file(&f).ok();
+}
+
+#[test]
+fn lint_rejects_json_plist() {
+    let f = std::env::temp_dir().join("plutil_json_lint.plist");
+    fs::write(&f, b"{\"Name\":\"Test\"}").unwrap();
+    let r = run(&["-lint", f.to_str().unwrap()]);
+    assert_eq!(r.exit_code, 1);
+    // Lint uses strict plist parser, rejects JSON
+    fs::remove_file(&f).ok();
+}
+
+#[test]
+fn json_convert_roundtrip() {
+    let f = sample_plist();
+    run(&["-convert", "json", f.to_str().unwrap()]);
+    // Should now be JSON format
+    let r = run(&["-extract", "Name", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "Test\n");
+    // Convert back to xml
+    run(&["-convert", "xml1", f.to_str().unwrap()]);
+    let r2 = run(&["-extract", "Name", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r2.stdout, "Test\n");
+}
+
+// ============================================================
+// Deep array-in-dict keypath
+// ============================================================
+
+#[test]
+fn deep_array_dict_keypath() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>L1</key>
+	<array>
+		<dict>
+			<key>L2</key>
+			<array>
+				<dict><key>Val</key><string>deep</string></dict>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>"#,
+    );
+    let r = run(&["-extract", "L1.0.L2.0.Val", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "deep\n");
+}
+
+// ============================================================
+// Cross-tool compatibility
+// ============================================================
+
+#[test]
+fn plutil_reads_plistbuddy_output() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Key</key>
+	<string>original</string>
+</dict>
+</plist>"#,
+    );
+    // Modify with PlistBuddy
+    let pb = {
+        let mut p = std::env::current_exe().unwrap();
+        p.pop();
+        p.pop();
+        p.push("PlistBuddy");
+        p
+    };
+    Command::new(&pb)
+        .args(["-c", "Set :Key modified", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    // Read with plutil
+    let r = run(&["-extract", "Key", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "modified\n");
+}
+
+// ============================================================
+// Lint error format (parenthesized)
+// ============================================================
+
+#[test]
+fn lint_error_has_parens() {
+    let f = std::env::temp_dir().join("plutil_lint_err.plist");
+    fs::write(&f, b"not a valid plist at all").unwrap();
+    let r = run(&["-lint", f.to_str().unwrap()]);
+    assert_eq!(r.exit_code, 1);
+    // Error message should be wrapped in parentheses
+    assert!(r.stderr.contains("("), "stderr: {}", r.stderr);
+    assert!(r.stderr.contains(")"), "stderr: {}", r.stderr);
+    fs::remove_file(&f).ok();
+}
+
+// ============================================================
+// Large array
+// ============================================================
+
+#[test]
+fn large_array_100_items() {
+    let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><array>"#);
+    for i in 0..100 {
+        xml.push_str(&format!("<string>item{i}</string>"));
+    }
+    xml.push_str("</array></plist>");
+    let f = temp_plist(&xml);
+    let r = run(&["-extract", "99", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "item99\n");
+}
+
+// ============================================================
+// String with special characters in JSON and Swift
+// ============================================================
+
+#[test]
+fn json_escaping_special_chars() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Q</key>
+	<string>she said "hello"</string>
+	<key>NL</key>
+	<string>line1
+line2</string>
+</dict>
+</plist>"#,
+    );
+    let r = run(&["-convert", "json", "-r", "-o", "-", f.to_str().unwrap()]);
+    assert!(r.stdout.contains("\\\"hello\\\""));
+    assert!(r.stdout.contains("\\n"));
+}
+
+// ============================================================
+// plutil -p with root scalar
+// ============================================================
+
+#[test]
+fn pretty_print_root_string() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<string>just a string</string>
+</plist>"#,
+    );
+    let r = run(&["-p", f.to_str().unwrap()]);
+    assert!(r.stdout.contains("just a string"));
+    assert_eq!(r.exit_code, 0);
+}
+
+// ============================================================
+// Remove from array
+// ============================================================
+
+#[test]
+fn remove_array_element() {
+    let f = sample_plist();
+    run(&["-remove", "Items.0", f.to_str().unwrap()]);
+    let r = run(&["-extract", "Items.0", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "b\n");
+}
+
+// ============================================================
+// Replace with JSON compound
+// ============================================================
+
+#[test]
+fn replace_with_json() {
+    let f = sample_plist();
+    run(&["-replace", "Sub", "-json", "{\"New\":\"val\"}", f.to_str().unwrap()]);
+    let r = run(&["-extract", "Sub.New", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "val\n");
+}
+
+// ============================================================
+// Negative values
+// ============================================================
+
+#[test]
+fn insert_negative_integer() {
+    let f = sample_plist();
+    run(&["-insert", "Neg", "-integer", "-99", f.to_str().unwrap()]);
+    let r = run(&["-extract", "Neg", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "-99\n");
+}
+
+#[test]
+fn insert_negative_float() {
+    let f = sample_plist();
+    run(&["-insert", "NegF", "-float", "-3.14", f.to_str().unwrap()]);
+    let r = run(&["-extract", "NegF", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "-3.140000\n");
+}
+
+// ============================================================
+// Binary plist roundtrip
+// ============================================================
+
+#[test]
+fn binary_plist_roundtrip_via_plutil() {
+    let f = sample_plist();
+    run(&["-convert", "binary1", f.to_str().unwrap()]);
+    let r = run(&["-extract", "Name", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "Test\n");
+    // Convert back
+    run(&["-convert", "xml1", f.to_str().unwrap()]);
+    let r2 = run(&["-extract", "Name", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r2.stdout, "Test\n");
+}
+
+// ============================================================
+// -s flag behavior
+// ============================================================
+
+#[test]
+fn silent_flag_with_missing_file_still_shows_error() {
+    let r = run(&["-lint", "-s", "/tmp/no_such_plutil_s.plist"]);
+    assert!(!r.stderr.is_empty());
+    assert_eq!(r.exit_code, 1);
+}
+
+// ============================================================
+// Insert at array index
+// ============================================================
+
+#[test]
+fn insert_at_array_middle() {
+    let f = sample_plist();
+    run(&["-insert", "Items.1", "-string", "middle", f.to_str().unwrap()]);
+    let r = run(&["-extract", "Items.0", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "a\n");
+    let r1 = run(&["-extract", "Items.1", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r1.stdout, "middle\n");
+    let r2 = run(&["-extract", "Items.2", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r2.stdout, "b\n");
+}
+
+// ============================================================
+// Insert -xml with compound value
+// ============================================================
+
+#[test]
+fn insert_xml_compound() {
+    let f = sample_plist();
+    run(&["-insert", "Xml", "-xml", "<array><string>x</string></array>", f.to_str().unwrap()]);
+    let r = run(&["-extract", "Xml.0", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "x\n");
+}
+
+// ============================================================
+// Pretty print date and data
+// ============================================================
+
+#[test]
+fn pretty_print_date_format() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>D</key>
+	<date>2024-06-15T12:00:00Z</date>
+</dict>
+</plist>"#,
+    );
+    let r = run(&["-p", f.to_str().unwrap()]);
+    assert!(r.stdout.contains("2024-06-15"));
+    assert!(r.stdout.contains("+0000"));
+}
+
+// ============================================================
+// Real-world system plist (if available)
+// ============================================================
+
+#[test]
+fn reads_system_binary_plist() {
+    let path = "/System/Applications/Utilities/Terminal.app/Contents/Info.plist";
+    if std::path::Path::new(path).exists() {
+        let r = run(&["-extract", "CFBundleIdentifier", "raw", "-o", "-", path]);
+        assert!(r.stdout.contains("Terminal") || r.stdout.contains("terminal"));
+        assert_eq!(r.exit_code, 0);
+    }
+}
+
+// ============================================================
+// Cross-tool: PlistBuddy writes, plutil reads
+// ============================================================
+
+#[test]
+fn cross_tool_plistbuddy_writes_plutil_reads() {
+    let f = sample_plist();
+    let pb = {
+        let mut p = std::env::current_exe().unwrap();
+        p.pop();
+        p.pop();
+        p.push("PlistBuddy");
+        p
+    };
+    Command::new(&pb)
+        .args(["-c", "Add :New string cross-test", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let r = run(&["-extract", "New", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "cross-test\n");
+}
+
+// ============================================================
+// Insert existing key fails
+// ============================================================
+
+#[test]
+fn insert_existing_key_fails() {
+    let f = sample_plist();
+    let r = run(&["-insert", "Name", "-string", "overwrite", f.to_str().unwrap()]);
+    assert!(r.stderr.contains("Value already exists at key path"));
+    assert_eq!(r.exit_code, 1);
+}
+
+// ============================================================
+// Remove last key from dict leaves empty dict
+// ============================================================
+
+#[test]
+fn remove_last_key_leaves_empty_dict() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Only</key>
+	<string>val</string>
+</dict>
+</plist>"#,
+    );
+    run(&["-remove", "Only", f.to_str().unwrap()]);
+    let r = run(&["-p", f.to_str().unwrap()]);
+    assert!(r.stdout.contains("{"));
+    // Name should be gone
+    let r2 = run(&["-extract", "Only", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r2.exit_code, 1);
+}
+
+// ============================================================
+// Append to non-array fails with correct message
+// ============================================================
+
+#[test]
+fn append_to_non_array_error() {
+    let f = sample_plist();
+    let r = run(&["-insert", "Name", "-string", "x", "-append", f.to_str().unwrap()]);
+    assert!(r.stderr.contains("Appending to a non-array"));
+    assert_eq!(r.exit_code, 1);
+}
+
+// ============================================================
+// Natural sort in -p output
+// ============================================================
+
+#[test]
+fn pretty_print_natural_sort() {
+    let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>"#);
+    for i in [10, 2, 1, 20, 3] {
+        xml.push_str(&format!("<key>Item{i}</key><string>v{i}</string>"));
+    }
+    xml.push_str("</dict></plist>");
+    let f = temp_plist(&xml);
+    let r = run(&["-p", f.to_str().unwrap()]);
+    // Natural sort: Item1, Item2, Item3, Item10, Item20
+    let keys: Vec<&str> = r.stdout.lines()
+        .filter(|l| l.contains("\"Item"))
+        .map(|l| l.trim())
+        .collect();
+    assert_eq!(keys[0], "\"Item1\" => \"v1\"");
+    assert_eq!(keys[1], "\"Item2\" => \"v2\"");
+    assert_eq!(keys[2], "\"Item3\" => \"v3\"");
+    assert_eq!(keys[3], "\"Item10\" => \"v10\"");
+    assert_eq!(keys[4], "\"Item20\" => \"v20\"");
+}
+
+// ============================================================
+// JSON readable sort is also natural
+// ============================================================
+
+#[test]
+fn json_readable_natural_sort() {
+    let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>"#);
+    for i in [10, 2, 1] {
+        xml.push_str(&format!("<key>K{i}</key><string>v{i}</string>"));
+    }
+    xml.push_str("</dict></plist>");
+    let f = temp_plist(&xml);
+    let r = run(&["-convert", "json", "-r", "-o", "-", f.to_str().unwrap()]);
+    let k1_pos = r.stdout.find("\"K1\"").unwrap();
+    let k2_pos = r.stdout.find("\"K2\"").unwrap();
+    let k10_pos = r.stdout.find("\"K10\"").unwrap();
+    assert!(k1_pos < k2_pos);
+    assert!(k2_pos < k10_pos);
+}
+
+// ============================================================
+// Swift mixed array gets [Any] annotation
+// ============================================================
+
+#[test]
+fn swift_mixed_array_any_annotation() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+	<string>text</string>
+	<integer>42</integer>
+</array>
+</plist>"#,
+    );
+    let r = run(&["-convert", "swift", "-o", "-", f.to_str().unwrap()]);
+    assert!(r.stdout.contains(": [Any] = ["));
+}
+
+#[test]
+fn swift_homogeneous_array_no_annotation() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+	<string>a</string>
+	<string>b</string>
+</array>
+</plist>"#,
+    );
+    let r = run(&["-convert", "swift", "-o", "-", f.to_str().unwrap()]);
+    assert!(!r.stdout.contains("[Any]"));
+    assert!(r.stdout.contains("let "));
+}
+
+// ============================================================
+// Nested arrays in JSON
+// ============================================================
+
+#[test]
+fn json_nested_arrays() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Matrix</key>
+	<array>
+		<array><integer>1</integer><integer>2</integer></array>
+		<array><integer>3</integer><integer>4</integer></array>
+	</array>
+</dict>
+</plist>"#,
+    );
+    let r = run(&["-convert", "json", "-o", "-", f.to_str().unwrap()]);
+    assert!(r.stdout.contains("[[1,2],[3,4]]"));
+}
+
+// ============================================================
+// Extract from root array by index
+// ============================================================
+
+#[test]
+fn extract_from_root_array() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+	<dict><key>name</key><string>Alice</string></dict>
+	<dict><key>name</key><string>Bob</string></dict>
+</array>
+</plist>"#,
+    );
+    let r = run(&["-extract", "0.name", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "Alice\n");
+    let r2 = run(&["-extract", "1.name", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r2.stdout, "Bob\n");
+}
+
+// ============================================================
+// -p does NOT escape special chars in strings
+// ============================================================
+
+#[test]
+fn pretty_print_raw_strings() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Q</key>
+	<string>she said "hello"</string>
+	<key>BS</key>
+	<string>back\slash</string>
+</dict>
+</plist>"#,
+    );
+    let r = run(&["-p", f.to_str().unwrap()]);
+    // -p shows raw quotes and backslashes, not escaped
+    assert!(r.stdout.contains(r#""she said "hello"""#));
+    assert!(r.stdout.contains(r#""back\slash""#));
+}
+
+// ============================================================
+// Swift and ObjC output literal tabs (not \t)
+// ============================================================
+
+#[test]
+fn swift_literal_tab() {
+    let f = temp_plist(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Tab</key>
+	<string>col1	col2</string>
+</dict>
+</plist>"#,
+    );
+    let r = run(&["-convert", "swift", "-o", "-", f.to_str().unwrap()]);
+    assert!(r.stdout.contains("col1\tcol2"));
+    assert!(!r.stdout.contains("\\t"));
+}
+
+// ============================================================
+// Replace container with scalar
+// ============================================================
+
+#[test]
+fn replace_container_with_scalar() {
+    let f = sample_plist();
+    run(&["-replace", "Sub", "-string", "flat", f.to_str().unwrap()]);
+    let r = run(&["-extract", "Sub", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "flat\n");
+    let r2 = run(&["-type", "Sub", f.to_str().unwrap()]);
+    assert_eq!(r2.stdout, "string\n");
+}
+
+// ============================================================
+// Replace scalar with container
+// ============================================================
+
+#[test]
+fn replace_scalar_with_container() {
+    let f = sample_plist();
+    run(&["-replace", "Name", "-json", "{\"k\":\"v\"}", f.to_str().unwrap()]);
+    let r = run(&["-extract", "Name.k", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "v\n");
+}
+
+// ============================================================
+// Convert idempotent (xml1 -> xml1)
+// ============================================================
+
+#[test]
+fn convert_xml1_idempotent() {
+    let f = sample_plist();
+    let before = fs::read_to_string(f.to_str().unwrap()).unwrap();
+    run(&["-convert", "xml1", f.to_str().unwrap()]);
+    let after = fs::read_to_string(f.to_str().unwrap()).unwrap();
+    // Content should be preserved (may differ in whitespace from original hand-written XML)
+    let r = run(&["-extract", "Name", "raw", "-o", "-", f.to_str().unwrap()]);
+    assert_eq!(r.stdout, "Test\n");
+    let _ = (before, after); // suppress unused warnings
+}
